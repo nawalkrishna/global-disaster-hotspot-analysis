@@ -1,4 +1,6 @@
 📌 Global Disaster Hotspot Mapping & Vulnerability Analysis (2000–2025)
+
+
 This project analyzes global disaster patterns using real-world EM-DAT data from 2000–2025.
 I combined data cleaning, visualization, geospatial mapping, and index construction using R.
 
