@@ -1,0 +1,401 @@
+---
+title: "Mini Project"
+author: "Nawal Krishna S"
+date: "2025-11-10"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## 1.Introduction
+
+This project examines global disaster patterns over the period 2000–2025, based on datasets extracted from the EM-DAT International Disaster Database.
+The goal is twofold:
+
+To identify global disaster hotspots using geospatial coordinates.
+
+To compute a country-level Vulnerability Index combining human and economic impact indicators.
+
+## 2.Loading Libraries
+
+we load all the R packages necessary for data wrangling, visualization, mapping, missing data exploration, and reading data from Google Drive.
+```{r}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(forcats)
+library(lubridate)
+
+library(ggplot2)
+library(viridis)
+
+library(naniar)
+library(visdat)
+library(simputation)
+
+library(leaflet)
+library(leaflet.extras)
+library(leaflet.providers)
+
+library(googledrive)
+
+```
+## 3.Accessing and Downloading Data from Google Drive
+
+The EM-DAT regional CSV files were stored in Google Drive.
+We authenticate access via the googledrive package and download the files directly into the working environment.
+
+```{r}
+drive_deauth()
+drive_auth()
+
+africa_file   <- drive_get("Africa.csv")
+america_file  <- drive_get("America.csv")
+asia_file     <- drive_get("Asia.csv")
+europe_file   <- drive_get("Europe.csv")
+oceania_file  <- drive_get("Oceaniia.csv")
+
+drive_download(africa_file,  path = "Africa.csv",    overwrite = TRUE)
+drive_download(america_file, path = "America.csv",   overwrite = TRUE)
+drive_download(asia_file,    path = "Asia.csv",      overwrite = TRUE)
+drive_download(europe_file,  path = "Europe.csv",    overwrite = TRUE)
+drive_download(oceania_file, path = "Oceaniia.csv",  overwrite = TRUE)
+
+```
+## 4.Merging All Regional Datasets
+
+All five regional datasets are combined to form a single global disaster dataset.
+This unified dataset enables comprehensive analysis across regions.
+
+```{r}
+africa   <- read_csv("Africa.csv")
+america  <- read_csv("America.csv")
+asia     <- read_csv("Asia.csv")
+europe   <- read_csv("Europe.csv")
+oceania  <- read_csv("Oceaniia.csv")
+
+disasters_raw <- bind_rows(africa, america, asia, europe, oceania)
+
+glimpse(disasters_raw)
+
+```
+
+## 5.Data Cleaning and Preprocessing
+
+To ensure consistent analysis:
+
+Dates are standardized
+
+Selected variables are converted to numeric
+
+Records outside 2000–2025 are removed
+
+Missing components of dates are imputed conservatively
+
+```{r}
+to_num <- function(x) suppressWarnings(as.numeric(x))
+
+disasters <- disasters_raw %>%
+mutate(`Start Year` = to_num(`Start Year`)) %>%
+filter(`Start Year` >= 2000, `Start Year` <= 2025) %>%
+mutate(
+TotalDeaths    = to_num(`Total Deaths`),
+TotalAffected  = to_num(`Total Affected`),
+TotalDamage    = to_num(`Total Damage ('000 US$)`),
+Latitude       = to_num(Latitude),
+Longitude      = to_num(Longitude),
+StartMonth     = to_num(`Start Month`),
+StartDay       = to_num(`Start Day`)
+) %>%
+mutate(
+StartMonth = if_else(is.na(StartMonth), 1, StartMonth),
+StartDay   = if_else(is.na(StartDay),   1, StartDay),
+StartDate  = make_date(year = `Start Year`,
+month = StartMonth,
+day = StartDay)
+)
+
+glimpse(disasters)
+
+```
+
+## 6.Missing Data Exploration
+
+Missing values are common in EM-DAT, especially for economic loss indicators.
+We visualize missingness using visdat and quantify missingness using naniar.
+
+```{r}
+vis_dat(disasters)
+
+gg_miss_var(disasters) +
+ggtitle("Missing Values per Variable")
+
+disasters %>%
+select(TotalDeaths, TotalAffected, TotalDamage, Latitude, Longitude) %>%
+miss_var_summary()
+
+```
+## 7.Preparing Data for Hotspot Mapping
+
+Hotspot mapping requires valid geographic coordinates.
+We retain only rows with non-missing latitude and longitude.
+
+```{r}
+disasters_validated <- disasters %>%
+mutate(
+TotalDeaths   = if_else(TotalDeaths   < 0, NA_real_, TotalDeaths),
+TotalAffected = if_else(TotalAffected < 0, NA_real_, TotalAffected),
+TotalDamage   = if_else(TotalDamage   < 0, NA_real_, TotalDamage)
+) %>%
+mutate(Magnitude = if_else(Magnitude < 0, NA_real_, Magnitude)) %>%
+mutate(
+Latitude  = if_else(Latitude  > 90  | Latitude  < -90,  NA_real_, Latitude),
+Longitude = if_else(Longitude > 180 | Longitude < -180, NA_real_, Longitude)
+) %>%
+filter(!is.na(`Start Year`))
+
+glimpse(disasters_validated)
+
+
+```
+```{r}
+cap_outliers <- function(x, lower = 0.01, upper = 0.99) {
+qnt <- quantile(x, probs = c(lower, upper), na.rm = TRUE)
+x[x < qnt[1]] <- qnt[1]
+x[x > qnt[2]] <- qnt[2]
+return(x)
+}
+
+disasters_clean <- disasters_validated %>%
+mutate(
+TotalDeaths_capped   = cap_outliers(TotalDeaths),
+TotalAffected_capped = cap_outliers(TotalAffected),
+TotalDamage_capped   = cap_outliers(TotalDamage)
+)
+
+glimpse(disasters_clean)
+
+
+```
+```{r}
+disasters_hotspot <- disasters %>%
+mutate(
+Latitude  = if_else(Latitude == 0, NA_real_, Latitude),
+Longitude = if_else(Longitude == 0, NA_real_, Longitude)
+) %>%
+filter(!is.na(Latitude), !is.na(Longitude)) %>%
+mutate(
+TotalDeaths   = if_else(is.na(TotalDeaths),   0, TotalDeaths),
+TotalAffected = if_else(is.na(TotalAffected), 0, TotalAffected)
+)
+
+head(disasters_hotspot)
+
+```
+
+
+## 8.Hotspot Mapping Using Leaflet
+
+An interactive world map is created to highlight significant disaster locations.
+Circle sizes are scaled using a logarithmic transformation of total deaths.
+
+```{r}
+pal <- colorFactor("Set1", domain = disasters_hotspot$`Disaster Type`)
+
+radius_vec <- log10(disasters_hotspot$TotalDeaths + 1)
+radius_min <- min(radius_vec, na.rm = TRUE)
+radius_max <- max(radius_vec, na.rm = TRUE)
+
+radius_scaled <- if (radius_max > radius_min) {
+3 + 7 * (radius_vec - radius_min) / (radius_max - radius_min)
+} else {
+rep(5, length(radius_vec))
+}
+
+leaflet(disasters_hotspot) %>%
+addProviderTiles("Esri.WorldGrayCanvas") %>%
+addCircleMarkers(
+lng = ~Longitude,
+lat = ~Latitude,
+radius = radius_scaled,
+stroke = FALSE,
+fillOpacity = 0.7,
+color = ~pal(`Disaster Type`),
+popup = ~paste0(
+"<b>Country:</b> ", Country, "<br/>",
+"<b>Disaster Group:</b> ", `Disaster Group`, "<br/>",
+"<b>Disaster Type:</b> ", `Disaster Type`, "<br/>",
+"<b>Total Deaths:</b> ", TotalDeaths, "<br/>",
+"<b>Total Affected:</b> ", TotalAffected
+),
+clusterOptions = markerClusterOptions()
+) %>%
+addLegend("bottomright", pal = pal,
+values = ~`Disaster Type`,
+title = "Disaster Type")
+
+```
+## 9.Constructing a Country-Level Vulnerability Index
+
+To quantify vulnerability, we combine human and economic impact using a weighted index.
+
+Weights used:
+
+Component	Weight
+Total deaths	0.5
+Total affected	0.3
+Total damage	0.2
+
+```{r}
+normalize_01 <- function(x) {
+if (all(is.na(x))) return(rep(0, length(x)))
+rng <- range(x, na.rm = TRUE)
+if (rng[1] == rng[2]) return(rep(0.5, length(x)))
+(x - rng[1]) / (rng[2] - rng[1])
+}
+country_scores <- disasters_clean %>%
+group_by(Country, Region) %>%
+summarise(
+total_deaths   = sum(TotalDeaths_capped, na.rm = TRUE),
+total_affected = sum(TotalAffected_capped, na.rm = TRUE),
+total_damage   = sum(TotalDamage_capped, na.rm = TRUE),
+.groups = "drop"
+) %>%
+mutate(
+deaths_norm   = normalize_01(total_deaths),
+affected_norm = normalize_01(total_affected),
+damage_norm   = normalize_01(total_damage),
+vulnerability_index =
+0.5 * deaths_norm +
+0.3 * affected_norm +
+0.2 * damage_norm
+) %>%
+arrange(desc(vulnerability_index))
+
+head(country_scores)
+
+
+```
+## 10.Top 15 Most Vulnerable Countries
+
+A comparative bar plot is generated using ggplot2.
+
+```{r}
+top15 <- country_scores %>% slice(1:15)
+
+ggplot(top15,
+aes(x = reorder(Country, vulnerability_index),
+y = vulnerability_index,
+fill = Region)) +
+geom_col() +
+coord_flip() +
+scale_fill_viridis_d() +
+labs(
+title = "Top 15 Most Vulnerable Countries (2000–2025)",
+x = "Country",
+y = "Vulnerability Index"
+) +
+theme_minimal()
+
+
+```
+
+## 11.Disaster Events by Region and period
+
+```{r}
+disasters %>%
+mutate(period = if_else(`Start Year` <= 2010, "2000–2010", "2011–2025")) %>%
+group_by(period, Region) %>%
+summarise(
+events = n(),
+deaths = sum(TotalDeaths, na.rm = TRUE),
+affected = sum(TotalAffected, na.rm = TRUE),
+.groups = "drop"
+) %>%
+ggplot(aes(x = Region, y = events, fill = period)) +
+geom_col(position = "dodge") +
+theme_minimal() +
+labs(
+title = "Disaster Events by Region and Period",
+x = "Region",
+y = "Number of Events"
+)
+
+```
+
+## 12.Number of Disaster by type
+
+```{r}
+disasters %>%
+count(`Disaster Type`) %>%
+ggplot(aes(x = reorder(`Disaster Type`, n), y = n, fill = `Disaster Type`)) +
+geom_col() +
+coord_flip() +
+labs(
+title = "Number of Disaster Events by Type (2000–2025)",
+x = "Disaster Type",
+y = "Number of Events"
+) +
+theme_minimal() +
+theme(legend.position = "none")
+
+```
+
+## 13.Total Death distribution
+
+```{r}
+disasters %>%
+filter(!is.na(TotalDeaths), TotalDeaths > 0) %>%
+ggplot(aes(x = TotalDeaths)) +
+geom_histogram(bins = 40, fill = "steelblue") +
+scale_x_log10() +
+labs(
+title = "Distribution of Disaster-Related Deaths",
+x = "Total Deaths (log scale)",
+y = "Frequency"
+) +
+theme_minimal()
+
+
+```
+
+## 14.Number of Events by year
+
+```{r}
+disasters %>%
+ggplot(aes(x = `Start Year`)) +
+geom_histogram(
+binwidth = 1,
+fill = "#4CAF50",
+alpha = 0.8,
+color = "white",
+linewidth = 0.3
+) +
+scale_x_continuous(
+breaks = seq(min(disasters$`Start Year`, na.rm = TRUE),
+max(disasters$`Start Year`, na.rm = TRUE),
+by = 2)
+) +
+labs(
+title = "Disaster Frequency Over Time (2000–2025)",
+x = "Year",
+y = "Number of Events"
+) +
+theme_minimal(base_size = 13) +
+theme(
+plot.title = element_text(face = "bold", size = 15),
+axis.text.x = element_text(angle = 45, hjust = 1)
+)
+
+```
+
+## 15. Conclusion
+
+
+This project provided a comprehensive analysis of global disasters from 2000 to 2025 using R.
+Through systematic data cleaning, domain-based validation, outlier capping, geospatial hotspot mapping, and the construction of a vulnerability index, the study identified highly vulnerable countries and regions.
+The combination of statistical analysis and interactive visualisations demonstrates the usefulness of R for large-scale disaster analytics.
